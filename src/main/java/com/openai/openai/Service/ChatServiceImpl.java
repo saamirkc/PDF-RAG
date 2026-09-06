@@ -3,6 +3,9 @@ package com.openai.openai.Service;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.client.advisor.MessageChatMemoryAdvisor;
+import org.springframework.ai.chat.memory.ChatMemory;
+import org.springframework.ai.chat.prompt.PromptTemplate;
 import org.springframework.ai.document.Document;
 import org.springframework.ai.rag.advisor.RetrievalAugmentationAdvisor;
 import org.springframework.ai.rag.generation.augmentation.ContextualQueryAugmenter;
@@ -12,6 +15,7 @@ import org.springframework.ai.rag.preretrieval.query.transformation.TranslationQ
 import org.springframework.ai.rag.retrieval.join.ConcatenationDocumentJoiner;
 import org.springframework.ai.rag.retrieval.search.VectorStoreDocumentRetriever;
 import org.springframework.ai.vectorstore.VectorStore;
+import org.springframework.ai.vectorstore.filter.FilterExpressionBuilder;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Service;
@@ -38,7 +42,7 @@ public class ChatServiceImpl implements ChatService {
 
     private final S3Service s3Service;
 
-
+private final ChatMemory chatMemory;
 
 //
 //    @Override
@@ -50,17 +54,19 @@ public class ChatServiceImpl implements ChatService {
 //    }
 
     @Override
-    public void addPdf(MultipartFile file) {
+    public void addPdf(MultipartFile file, String userId) {
 
         String s3Key =s3Service.uploadFile(file);
 
-        List<Document> list = this.reader.readPdfFromS3(s3Key,file.getOriginalFilename());
+        List<Document> list = this.reader.readPdfFromS3(s3Key,userId,file.getOriginalFilename());
         vectorStore.add(list);
 
     }
 
     @Override
-    public String retreiveDataFromVectorDB(String message) {
+    public String retreiveDataFromVectorDB(String message, String userId) {
+
+
 
 
 //      1.  preprocess query(pre-retrieval)
@@ -82,13 +88,36 @@ public class ChatServiceImpl implements ChatService {
         vectorStore(vectorStore).
         topK(3).
         similarityThreshold(0.4).
+        filterExpression(new FilterExpressionBuilder().
+                eq("userId",userId).
+                build()).
         build()).
-
+//eq("userId","userId")  first userId is the metadata that we save while reading pdf and second userId is our userId
 //       2.2  combine documents
         documentJoiner(new ConcatenationDocumentJoiner()).
 
 //    3.Post-retrieval:  context+query passed
-        queryAugmenter(ContextualQueryAugmenter.builder().build()).
+        queryAugmenter(ContextualQueryAugmenter.builder().
+        allowEmptyContext(true).
+        promptTemplate(PromptTemplate.builder().
+                template("""
+                        
+                                        You are a helpful assistant. Some context from the user's documents
+                                        may be provided below — use it if it's relevant to the question.
+                                        If the context is empty or not relevant, just answer normally using
+                                        your own knowledge and the conversation history.
+                        
+                                        Context:
+                                        ---------------------
+                                        {context}
+                                        ---------------------
+                        
+                                        Question: {query}
+                        
+                        """).
+
+                build()).
+        build()).
 
                 build();
 
@@ -96,7 +125,7 @@ public class ChatServiceImpl implements ChatService {
 // call LLM
         return chatClient.
                 prompt().
-                advisors(advisor).
+                advisors(a-> a.advisors(advisor).param(ChatMemory.CONVERSATION_ID,userId)).
                 user(message).
                 call().
                 content();
